@@ -103,8 +103,9 @@ def test_circular_two_cuts_two_fragments():
 
 
 def test_ambiguous_bases_in_pattern_and_sequence():
-    # 模式含 N：ANNT 匹配 AGTT
-    enz = FakeEnzyme("Amb1", "ANNT", 1, 1)
+    # 模式含 N：ANNT 匹配 AGTT（偏移 2/2 镜像对称，回文模式只计一次，
+    # 使本测试专注于简并匹配；方向折叠见回文系列测试）
+    enz = FakeEnzyme("Amb1", "ANNT", 2, 2)
     result = run_digest("CAGTT", "linear", [enz])
     assert len(result["cuts"]) == 1
     assert result["cuts"][0]["sites"][0]["start"] == 1
@@ -113,6 +114,64 @@ def test_ambiguous_bases_in_pattern_and_sequence():
     result2 = run_digest("GGCGCN", "linear", [enz2])
     assert len(result2["cuts"]) == 1
     assert result2["cuts"][0]["sites"][0]["start"] == 1
+
+
+def test_palindrome_asymmetric_offsets_both_orientations():
+    # 回文模式 ATAT（k=4）偏移 (1,1) 不满足镜像对称（1+1 != 4）：
+    # 同一识别位点上正向结合切 (2,2)、反向结合切 (4,4)，分别保留
+    enz = FakeEnzyme("Pal", "ATAT", 1, 1)
+    result = run_digest("AATATG", "linear", [enz])
+    assert [(c["top_cut"], c["bottom_cut"]) for c in result["cuts"]] == [(2, 2), (4, 4)]
+    fwd, rev = result["cuts"]
+    assert fwd["end_type"] == "blunt" and rev["end_type"] == "blunt"
+    assert fwd["sites"] == [
+        {"enzyme": "Pal", "start": 1, "strand": "+", "matched": "ATAT"}
+    ]
+    assert rev["sites"] == [
+        {"enzyme": "Pal", "start": 1, "strand": "-", "matched": "ATAT"}
+    ]
+    # 两个边界 -> 三条片段
+    assert [f["length"] for f in result["fragments"]] == [2, 2, 2]
+    assert [f["sequence"] for f in result["fragments"]] == ["AA", "TA", "TG"]
+
+
+def test_palindrome_mirror_symmetric_offsets_not_double_counted():
+    # 回文模式偏移镜像对称（cut_top + cut_bottom == k）时两个方向
+    # 产生同一物理切口：只搜一次，切口与位点均不重复计数
+    enz = FakeEnzyme("PalSym", "ATAT", 1, 3)  # 1+3 == 4
+    result = run_digest("AATATG", "linear", [enz])
+    assert len(result["cuts"]) == 1
+    cut = result["cuts"][0]
+    assert (cut["top_cut"], cut["bottom_cut"]) == (2, 4)
+    assert cut["end_type"] == "5prime"
+    assert cut["overhang"] == "TA"
+    assert cut["sites"] == [
+        {"enzyme": "PalSym", "start": 1, "strand": "+", "matched": "ATAT"}
+    ]
+    assert [f["length"] for f in result["fragments"]] == [2, 4]
+
+
+def test_palindrome_asymmetric_sticky_ends():
+    # 非镜像对称偏移的回文产生黏端时，两个方向各自换算切口与突出端
+    enz = FakeEnzyme("PalSticky", "GANTC", 0, 2)  # k=5，0+2 != 5
+    result = run_digest("AAGATTCCAA", "linear", [enz])  # 位点 GATTC 起于 2
+    assert [
+        (c["top_cut"], c["bottom_cut"], c["end_type"], c["overhang"])
+        for c in result["cuts"]
+    ] == [(2, 4, "5prime", "GA"), (5, 7, "5prime", "TC")]
+    assert [s["strand"] for c in result["cuts"] for s in c["sites"]] == ["+", "-"]
+    assert [f["length"] for f in result["fragments"]] == [2, 3, 5]
+
+
+def test_palindrome_asymmetric_offsets_circular():
+    # 环形序列上同一回文位点的正反结合同样落在不同物理坐标
+    enz = FakeEnzyme("Pal", "ATAT", 1, 1)
+    result = run_digest("AATATG", "circular", [enz])
+    assert [(c["top_cut"], c["bottom_cut"]) for c in result["cuts"]] == [(2, 2), (4, 4)]
+    frags = result["fragments"]
+    assert len(frags) == 2
+    assert sorted(f["length"] for f in frags) == [2, 4]
+    assert sum(f["length"] for f in frags) == 6
 
 
 def test_overlapping_sites():

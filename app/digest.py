@@ -10,6 +10,16 @@
   一致时才合并为一条记录；末端不一致即冲突，整个计算以
   CutConflictError 拒绝（否则合并结果会随酶名排序变化）。
 
+结合方向
+--------
+* 每个酶同时在两个方向搜索：top 链上的 pattern（正向）与其反向互补
+  （反向，即酶结合在 bottom 链上）；反向命中按酶自身坐标系换算回
+  top 链坐标（top = start + k - cut_bottom，bottom = start + k - cut_top）。
+* 回文模式的两个结合方向命中同一批位点：切口偏移镜像对称
+  （cut_top + cut_bottom == k）时两个方向产生同一物理切口，只按正向
+  计一次；不对称时正反结合落在不同物理坐标，两个方向分别搜索、
+  各自保留（反向位点记 strand "-"）。
+
 末端类型
 --------
 * top_cut == bottom_cut        -> blunt（平端）
@@ -87,11 +97,36 @@ def _end_type_and_overhang(haystack: str, top_raw: int, bottom_raw: int):
     return BLUNT, ""
 
 
+def _binding_orientations(enzyme) -> list[tuple[str, bool]]:
+    """返回该酶需要搜索的 (识别模式, 是否正向结合) 列表。
+
+    非回文模式：在 top 链上分别搜索 pattern（正向）与
+    revcomp(pattern)（反向，即酶结合在 bottom 链上）。
+    回文模式的两个结合方向命中同一批位点，是否重复搜索取决于切口
+    偏移是否镜像对称（cut_top + cut_bottom == 模式长度）：
+    * 对称：两个方向换算出的物理切口完全相同，只按正向搜一次，
+      同一位点不重复计数；
+    * 不对称：正反结合落在不同物理坐标，两个方向都要搜索，
+      各自换算切口、分别保留（反向位点记 strand "-"）。
+    """
+    pattern = enzyme.pattern
+    revcomp = reverse_complement(pattern)
+    if revcomp != pattern:
+        return [(oriented, oriented == pattern) for oriented in sorted({pattern, revcomp})]
+    orientations = [(pattern, True)]
+    if enzyme.cut_top + enzyme.cut_bottom != len(pattern):
+        orientations.append((pattern, False))
+    return orientations
+
+
 def compute_cuts(sequence: str, topology: str, enzymes) -> list[dict]:
     """计算所有酶的切割事件，并按物理切口 (top, bottom) 去重。
 
     每个酶同时在两个方向搜索：top 链上的 pattern（正向）与
-    revcomp(pattern)（反向，即酶结合在 bottom 链上）。回文模式只搜一次。
+    revcomp(pattern)（反向，即酶结合在 bottom 链上）。回文模式的两个
+    方向命中同一批位点：切口偏移镜像对称（cut_top + cut_bottom == k）
+    时两个方向产生同一物理切口，只搜一次、不重复计数；不对称时正反
+    结合落在不同物理坐标，两个方向分别搜索并各自保留切口。
     反向命中时切口坐标按酶自身坐标系换算回 top 链坐标：
         top_cut    = start + k - cut_bottom
         bottom_cut = start + k - cut_top
@@ -112,8 +147,7 @@ def compute_cuts(sequence: str, topology: str, enzymes) -> list[dict]:
     conflicts: dict[tuple[int, int], set[tuple[str, str]]] = {}
     for enz in sorted(enzymes, key=lambda e: (e.name, e.pattern, e.cut_top, e.cut_bottom)):
         k = len(enz.pattern)
-        for oriented in sorted({enz.pattern, reverse_complement(enz.pattern)}):
-            forward = oriented == enz.pattern
+        for oriented, forward in _binding_orientations(enz):
             for start in find_sites(sequence, oriented, circular):
                 if forward:
                     top_raw = start + enz.cut_top

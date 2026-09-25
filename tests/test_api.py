@@ -174,6 +174,49 @@ def test_circular_shared_top_cut_counts_consistent(client):
     assert items[0]["fragment_count"] == len(body["fragments"]) == 1
 
 
+def test_palindrome_asymmetric_offsets_recorded_via_api(client):
+    # 回文模式 ATAT 偏移 (1,1) 不满足镜像对称：正/反结合落在不同物理
+    # 坐标，新提交必须同时记录 (2,2) 与 (4,4) 两个切口及三条片段
+    payload = eco_request(
+        sequence="AATATG",
+        enzymes=[{"name": "Pal", "pattern": "ATAT", "cut_top": 1, "cut_bottom": 1}],
+    )
+    resp = client.post("/digests", json=payload)
+    assert resp.status_code == 201
+    body = resp.json()
+    assert [(c["top_cut"], c["bottom_cut"]) for c in body["cuts"]] == [(2, 2), (4, 4)]
+    assert [f["length"] for f in body["fragments"]] == [2, 2, 2]
+    assert [s["strand"] for c in body["cuts"] for s in c["sites"]] == ["+", "-"]
+
+    got = client.get(f"/digests/{body['id']}")
+    assert got.status_code == 200
+    assert got.json() == body  # 落库结果与提交响应完全一致
+
+    items = client.get("/digests").json()
+    assert len(items) == 1
+    # 列表摘要计数与修正后的明细一致
+    assert items[0]["cut_count"] == 2
+    assert items[0]["fragment_count"] == 3
+
+
+def test_palindrome_mirror_symmetric_offsets_single_cut_via_api(client):
+    # 回文模式偏移镜像对称（cut_top + cut_bottom == len(pattern)）时
+    # 两个结合方向产生同一物理切口：只记录一次，不重复计数
+    payload = eco_request(
+        sequence="AATATG",
+        enzymes=[{"name": "PalSym", "pattern": "ATAT", "cut_top": 1, "cut_bottom": 3}],
+    )
+    resp = client.post("/digests", json=payload)
+    assert resp.status_code == 201
+    body = resp.json()
+    assert len(body["cuts"]) == 1
+    cut = body["cuts"][0]
+    assert (cut["top_cut"], cut["bottom_cut"]) == (2, 4)
+    assert len(cut["sites"]) == 1
+    assert cut["sites"][0]["strand"] == "+"
+    assert [f["length"] for f in body["fragments"]] == [2, 4]
+
+
 def test_same_input_same_result_order(client):
     payload = eco_request(
         sequence="GAATTCAAAAGATATCTTTTGGTACC",
