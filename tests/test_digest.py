@@ -103,16 +103,26 @@ def test_circular_two_cuts_two_fragments():
 
 
 def test_ambiguous_bases_in_pattern_and_sequence():
-    # 模式含 N：ANNT 匹配 AGTT
+    # 模式含 N：ANNT 为回文模式，cut 1/1 不满足镜像对称（1+1 != 4），
+    # 同一识别位点（起于 1）的正/反结合分别落在 (2,2) 与 (4,4)
     enz = FakeEnzyme("Amb1", "ANNT", 1, 1)
     result = run_digest("CAGTT", "linear", [enz])
-    assert len(result["cuts"]) == 1
-    assert result["cuts"][0]["sites"][0]["start"] == 1
-    # 序列含简并碱基：模式 GCGC 可匹配 GCGN（N 与 C 有交集）
+    assert len(result["cuts"]) == 2
+    first, second = result["cuts"]
+    assert (first["top_cut"], first["bottom_cut"]) == (2, 2)
+    assert first["sites"][0]["start"] == 1
+    assert first["sites"][0]["strand"] == "+"
+    assert (second["top_cut"], second["bottom_cut"]) == (4, 4)
+    assert second["sites"][0]["start"] == 1
+    assert second["sites"][0]["strand"] == "-"
+    assert [f["length"] for f in result["fragments"]] == [2, 2, 1]
+    # 序列含简并碱基：模式 GCGC（cut 2/2 镜像对称）可匹配 GCGN
+    # （N 与 C 有交集）；镜像偏移正反结合同坐标，只产生一条切口记录
     enz2 = FakeEnzyme("Amb2", "GCGC", 2, 2)
     result2 = run_digest("GGCGCN", "linear", [enz2])
     assert len(result2["cuts"]) == 1
     assert result2["cuts"][0]["sites"][0]["start"] == 1
+    assert len(result2["cuts"][0]["sites"]) == 1
 
 
 def test_overlapping_sites():
@@ -138,6 +148,48 @@ def test_reverse_strand_site():
     assert (cut["top_cut"], cut["bottom_cut"]) == (4, 6)
     assert cut["end_type"] == "5prime"
     assert cut["overhang"] == "CC"  # seq[4:6]
+
+
+def test_palindrome_non_mirror_offset_folds_both_directions():
+    # 回文模式 ATAT、cut_top=cut_bottom=1：偏移不满足镜像对称（1+1 != 4），
+    # 同一识别位点（AATATG 上起于 1）的正向结合切口在 (2,2)，反向结合
+    # 换算后落在 (4,4)——两个物理坐标都必须保留，不得因模式回文而漏掉反向。
+    enz = FakeEnzyme("Pal", "ATAT", 1, 1)
+    result = run_digest("AATATG", "linear", [enz])
+    assert [(c["top_cut"], c["bottom_cut"]) for c in result["cuts"]] == [(2, 2), (4, 4)]
+    by_key = {(c["top_cut"], c["bottom_cut"]): c for c in result["cuts"]}
+    assert [(s["start"], s["strand"]) for s in by_key[(2, 2)]["sites"]] == [(1, "+")]
+    assert [(s["start"], s["strand"]) for s in by_key[(4, 4)]["sites"]] == [(1, "-")]
+    assert all(c["end_type"] == "blunt" and c["overhang"] == "" for c in result["cuts"])
+    # 两个内部边界 -> 三条片段，长度之和等于序列长度
+    assert [f["length"] for f in result["fragments"]] == [2, 2, 2]
+    assert [f["sequence"] for f in result["fragments"]] == ["AA", "TA", "TG"]
+
+
+def test_palindrome_mirror_offset_not_double_counted():
+    # 回文模式 + 镜像对称偏移（cut_top + cut_bottom == k）：反向结合换算
+    # 回同一物理坐标，是同一个结合事件，只保留一条切口、一个位点记录。
+    enz = FakeEnzyme("Mir", "ATAT", 1, 3)
+    result = run_digest("CAATATG", "linear", [enz])
+    assert len(result["cuts"]) == 1
+    cut = result["cuts"][0]
+    # 位点起于 2：正向 (2+1, 2+3) == 反向换算 (2+4-3, 2+4-1) == (3, 5)
+    assert (cut["top_cut"], cut["bottom_cut"]) == (3, 5)
+    assert cut["end_type"] == "5prime"
+    assert cut["overhang"] == "TA"  # seq[3:5]
+    assert [(s["start"], s["strand"]) for s in cut["sites"]] == [(2, "+")]
+    assert [f["length"] for f in result["fragments"]] == [3, 4]
+
+
+def test_palindrome_non_mirror_sticky_end_reverse_overhang():
+    # 回文模式、非镜像偏移产生黏端时，反向命中的突出端按 top 链区段换算
+    enz = FakeEnzyme("Stk", "ATAT", 0, 1)
+    result = run_digest("CAATATG", "linear", [enz])
+    assert [(c["top_cut"], c["bottom_cut"]) for c in result["cuts"]] == [(2, 3), (5, 6)]
+    by_key = {(c["top_cut"], c["bottom_cut"]): c for c in result["cuts"]}
+    assert by_key[(2, 3)]["overhang"] == "A"        # seq[2:3]
+    assert by_key[(5, 6)]["overhang"] == "T"        # 反向：seq[5:6]
+    assert [(s["start"], s["strand"]) for s in by_key[(5, 6)]["sites"]] == [(2, "-")]
 
 
 def test_physical_cut_deduplicated():

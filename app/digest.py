@@ -91,7 +91,12 @@ def compute_cuts(sequence: str, topology: str, enzymes) -> list[dict]:
     """计算所有酶的切割事件，并按物理切口 (top, bottom) 去重。
 
     每个酶同时在两个方向搜索：top 链上的 pattern（正向）与
-    revcomp(pattern)（反向，即酶结合在 bottom 链上）。回文模式只搜一次。
+    revcomp(pattern)（反向，即酶结合在 bottom 链上）。回文模式的两个
+    方向也分别搜索，因为方向折叠仅在**镜像对称偏移**
+    （cut_top + cut_bottom == k）时成立——此时反向命中换算出的坐标与
+    正向完全相同，搜索两次只会把同一个结合事件重复计数，故只搜正向；
+    偏移不满足镜像对称时（如平端酶切在模式中点以外），同一序列位置的
+    正/反结合落在**不同**物理坐标，两个方向的命中都必须保留。
     反向命中时切口坐标按酶自身坐标系换算回 top 链坐标：
         top_cut    = start + k - cut_bottom
         bottom_cut = start + k - cut_top
@@ -112,8 +117,15 @@ def compute_cuts(sequence: str, topology: str, enzymes) -> list[dict]:
     conflicts: dict[tuple[int, int], set[tuple[str, str]]] = {}
     for enz in sorted(enzymes, key=lambda e: (e.name, e.pattern, e.cut_top, e.cut_bottom)):
         k = len(enz.pattern)
-        for oriented in sorted({enz.pattern, reverse_complement(enz.pattern)}):
-            forward = oriented == enz.pattern
+        rc_pattern = reverse_complement(enz.pattern)
+        # 回文且偏移镜像对称：反向命中与正向命中是同一个结合事件，
+        # 换算后坐标必然相同，只搜一个方向，不得重复计数
+        mirror = rc_pattern == enz.pattern and enz.cut_top + enz.cut_bottom == k
+        orientations = ((enz.pattern, True),) if mirror else (
+            (enz.pattern, True),
+            (rc_pattern, False),
+        )
+        for oriented, forward in orientations:
             for start in find_sites(sequence, oriented, circular):
                 if forward:
                     top_raw = start + enz.cut_top
